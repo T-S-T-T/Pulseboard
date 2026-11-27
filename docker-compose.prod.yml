@@ -1,0 +1,74 @@
+# Single-server deployment with automatic HTTPS. See docs/deployment.md.
+name: pulseboard-prod
+
+x-api-build: &api-build
+  context: .
+  dockerfile: apps/api/Dockerfile
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pulseboard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env.production}
+      POSTGRES_DB: pulseboard
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-h', '127.0.0.1', '-U', 'pulseboard', '-d', 'pulseboard']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: *api-build
+    command: ['node', 'dist/migrate-cli.js']
+    environment:
+      MIGRATION_DATABASE_URL: postgres://pulseboard:${POSTGRES_PASSWORD}@db:5432/pulseboard
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set in .env.production}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: *api-build
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://pulseboard_app:${APP_DB_PASSWORD}@db:5432/pulseboard
+      APP_URL: https://${DOMAIN:?set in .env.production}
+      TRUST_PROXY: '1' # Caddy
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_NAME: ${OIDC_NAME:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - web
+      - api
+
+volumes:
+  db-data:
+  caddy-data:

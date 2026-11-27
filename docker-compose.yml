@@ -1,0 +1,74 @@
+# Local development. `docker compose up -d --wait db` for the database only, or
+# `docker compose up --build` to run the whole app on http://localhost:3000.
+name: pulseboard
+
+x-api-build: &api-build
+  context: .
+  dockerfile: apps/api/Dockerfile
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pulseboard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulseboard_owner_dev}
+      POSTGRES_DB: pulseboard
+    ports:
+      - '127.0.0.1:${POSTGRES_PORT:-5433}:5432'
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP: the temporary server used during first start listens only on a socket.
+      test: ['CMD', 'pg_isready', '-h', '127.0.0.1', '-U', 'pulseboard', '-d', 'pulseboard']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: *api-build
+    command: ['node', 'dist/migrate-cli.js']
+    environment:
+      MIGRATION_DATABASE_URL: postgres://pulseboard:${POSTGRES_PASSWORD:-pulseboard_owner_dev}@db:5432/pulseboard
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-pulseboard_app_dev}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: *api-build
+    environment:
+      DATABASE_URL: postgres://pulseboard_app:${APP_DB_PASSWORD:-pulseboard_app_dev}@db:5432/pulseboard
+      APP_URL: http://localhost:3000
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_NAME: ${OIDC_NAME:-}
+    ports:
+      - '127.0.0.1:4000:4000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4000/api/ready').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - '127.0.0.1:3000:3000'
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  db-data:
