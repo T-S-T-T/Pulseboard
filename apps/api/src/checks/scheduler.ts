@@ -7,21 +7,26 @@ export interface SchedulerOptions {
   pollMs?: number;
   concurrency?: number;
   retentionDays?: number;
+  /** How long a job may go unreported before it is handed out again. */
+  leaseSeconds?: number;
   onError?: (error: unknown) => void;
 }
 
-interface DueService {
-  id: string;
+interface Job {
+  job_id: string;
   url: string;
   method: 'GET' | 'HEAD';
   timeout_ms: number;
 }
 
 const PURGE_EVERY_MS = 60 * 60 * 1000;
+const SCHEDULE_LIMIT = 100;
 
 /**
- * Runs checks inside the API process. Due services are claimed in the database,
- * so more than one instance can run safely. Phase 2 replaces this with workers.
+ * Runs checks inside the API process. Due services become jobs in the database
+ * and each job is leased to one instance at a time, so several instances can run
+ * safely and a job interrupted by a crash is retried. Separate workers will
+ * replace the in-process probe later in phase 2.
  */
 export function createScheduler({
   db,
@@ -29,6 +34,8 @@ export function createScheduler({
   pollMs = 5_000,
   concurrency = 10,
   retentionDays = 30,
+  // Comfortably longer than the longest check timeout (15 seconds).
+  leaseSeconds = 60,
   onError = console.error,
 }: SchedulerOptions) {
   let timer: NodeJS.Timeout | undefined;
@@ -36,21 +43,22 @@ export function createScheduler({
   let stopped = true;
   let lastPurge = 0;
 
-  /** Claims and runs one batch. Returns the number of services claimed. */
+  /** Leases and runs one batch. Returns the number of jobs leased. */
   async function runBatch(): Promise<number> {
-    const { rows } = await db.query<DueService>('SELECT * FROM claim_due_services($1)', [
+    await db.query('SELECT schedule_check_jobs($1)', [SCHEDULE_LIMIT]);
+    const { rows } = await db.query<Job>('SELECT * FROM lease_check_jobs($1, $2)', [
       concurrency,
+      leaseSeconds,
     ]);
     const outcomes = await Promise.allSettled(
-      rows.map(async (service) => {
+      rows.map(async (job) => {
         const result = await check({
-          url: service.url,
-          method: service.method,
-          timeoutMs: service.timeout_ms,
+          url: job.url,
+          method: job.method,
+          timeoutMs: job.timeout_ms,
         });
-        await db.query('SELECT record_check($1, $2, $3, $4, $5, $6)', [
-          service.id,
-          service.url,
+        await db.query('SELECT complete_check_job($1, $2, $3, $4, $5)', [
+          job.job_id,
           result.ok,
           result.statusCode,
           result.latencyMs,

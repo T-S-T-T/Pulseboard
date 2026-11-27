@@ -25,6 +25,26 @@ const down = async () => ({
   error: 'HTTP 500',
 });
 
+const makeDue = (serviceId: string) =>
+  owner.query('UPDATE services SET next_check_at = now() WHERE id = $1', [serviceId]);
+
+/** Does what a worker does: takes a job without reporting a result yet. */
+async function lease() {
+  await target.db.query('SELECT schedule_check_jobs(100)');
+  const { rows } = await target.db.query<{ job_id: string }>(
+    'SELECT job_id FROM lease_check_jobs(10, 60)',
+  );
+  return rows[0]?.job_id;
+}
+
+async function complete(job: string, ok: boolean) {
+  const { rows } = await target.db.query<{ recorded: boolean }>(
+    'SELECT complete_check_job($1, $2, $3, 5, $4) AS recorded',
+    [job, ok, ok ? 200 : 500, ok ? null : 'HTTP 500'],
+  );
+  return rows[0]!.recorded;
+}
+
 async function setUp(extra: object = {}) {
   const user = await signUp(target);
   const team = await createTeam(user);
@@ -128,19 +148,18 @@ describe('scheduler', () => {
     });
   });
 
-  it('forgets history when the URL changes and drops stale results', async () => {
+  it('forgets history when the URL changes and drops the pending result', async () => {
     const { user, base, service } = await setUp();
     await createScheduler({ db: target.db, probe: down }).runBatch();
+    await makeDue(service.id);
+    const job = (await lease())!;
     const changed = await user.request('PATCH', `${base}/services/${service.id}`, {
       url: 'https://example.org/',
     });
     expect(changed.body.service).toMatchObject({ lastOk: null, recentChecks: [] });
 
     // A check of the old URL that finishes late.
-    await target.db.query('SELECT record_check($1, $2, true, 200, 1, NULL)', [
-      service.id,
-      SERVICE.url,
-    ]);
+    expect(await complete(job, true)).toBe(false);
     const list = await user.request('GET', `${base}/services`);
     expect(list.body.services[0].recentChecks).toEqual([]);
   });

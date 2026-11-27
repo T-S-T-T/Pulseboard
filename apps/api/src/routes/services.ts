@@ -47,6 +47,21 @@ const serviceSchema = z.object({
   recentChecks: z.array(checkSchema),
 });
 
+const incidentSchema = z.object({
+  id: z.uuid(),
+  serviceId: z.uuid(),
+  serviceName: z.string(),
+  openedAt: z.string(),
+  /** Null while the incident is open. */
+  resolvedAt: z.string().nullable(),
+  error: z.string().nullable(),
+});
+
+type IncidentRow = Omit<z.infer<typeof incidentSchema>, 'openedAt' | 'resolvedAt'> & {
+  openedAt: Date;
+  resolvedAt: Date | null;
+};
+
 type ServiceRow = Omit<z.infer<typeof serviceSchema>, 'lastCheckedAt' | 'recentChecks'> & {
   lastCheckedAt: Date | null;
 };
@@ -131,6 +146,41 @@ export function serviceRoutes(
       return withUser(db, user.id, async (tx) => {
         await requireRole(tx, teamId, 'member');
         return { services: await loadServices(tx, teamId) };
+      });
+    },
+  );
+
+  app.get(
+    '/api/teams/:teamId/incidents',
+    {
+      schema: {
+        tags: ['incidents'],
+        params: teamParams,
+        response: { 200: z.object({ incidents: z.array(incidentSchema) }) },
+      },
+    },
+    async (request) => {
+      const user = await sessions.requireUser(request);
+      const { teamId } = request.params;
+      return withUser(db, user.id, async (tx) => {
+        await requireRole(tx, teamId, 'member');
+        // Open incidents first, then the most recent.
+        const { rows } = await tx.query<IncidentRow>(
+          `SELECT i.id, i.service_id AS "serviceId", s.name AS "serviceName",
+                  i.opened_at AS "openedAt", i.resolved_at AS "resolvedAt", i.error
+           FROM incidents i JOIN services s ON s.id = i.service_id
+           WHERE i.team_id = $1
+           ORDER BY (i.resolved_at IS NULL) DESC, i.opened_at DESC, i.id
+           LIMIT 20`,
+          [teamId],
+        );
+        return {
+          incidents: rows.map((row) => ({
+            ...row,
+            openedAt: row.openedAt.toISOString(),
+            resolvedAt: row.resolvedAt?.toISOString() ?? null,
+          })),
+        };
       });
     },
   );

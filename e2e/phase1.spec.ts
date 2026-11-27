@@ -35,6 +35,8 @@ test('sign up, see a failed check, publish it and invite a teammate', async ({ p
   const card = page.getByRole('listitem', { name: 'Broken API' });
   await expect(card.getByText('Down', { exact: true })).toBeVisible({ timeout: 45_000 });
   await expect(card).toContainText('DNS lookup failed');
+  // One failure is not yet an incident.
+  await expect(page.getByRole('region', { name: 'Incidents' })).toContainText('No incidents');
 
   await page.getByLabel('Publish the status page').click();
   const link = page.getByRole('link', { name: 'View status page' });

@@ -46,6 +46,15 @@ export interface Service {
   recentChecks: Check[];
 }
 
+export interface Incident {
+  id: string;
+  serviceId: string;
+  serviceName: string;
+  openedAt: string;
+  resolvedAt: string | null;
+  error: string | null;
+}
+
 export interface StatusPage {
   team: string;
   services: {

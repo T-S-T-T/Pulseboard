@@ -1,5 +1,6 @@
 /** Tenant isolation, checked both through the API and directly against RLS. */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createScheduler } from '../../src/checks/scheduler.js';
 import { withUser } from '../../src/db.js';
 import {
   createTeam,
@@ -25,17 +26,18 @@ beforeAll(async () => {
   ownTeamId = (await createTeam(mallory, 'Mallory Co')).id;
   const created = await alice.request('POST', `/api/teams/${teamId}/services`, SERVICE);
   serviceId = created.body.service.id;
-  await target.db.query('SELECT record_check($1, $2, true, 200, 5, NULL)', [
-    serviceId,
-    SERVICE.url,
-  ]);
+  // One recorded result, so there is something to hide.
+  await createScheduler({
+    db: target.db,
+    probe: async () => ({ ok: true, statusCode: 200, latencyMs: 5, error: null }),
+  }).runBatch();
 });
 afterAll(() => target.close());
 
 describe('API isolation', () => {
   it('hides another team completely', async () => {
     const base = `/api/teams/${teamId}`;
-    for (const url of [base, `${base}/services`]) {
+    for (const url of [base, `${base}/services`, `${base}/incidents`]) {
       expect((await mallory.request('GET', url)).status).toBe(404);
     }
     expect((await mallory.request('POST', `${base}/services`, SERVICE)).status).toBe(404);
@@ -61,7 +63,7 @@ describe('row-level security without any application checks', () => {
     withUser(target.db, mallory.id, (tx) => tx.query(sql, values)) as Promise<T>;
   type Result = { rows: unknown[]; rowCount: number };
 
-  it.each(['teams', 'memberships', 'services', 'check_results', 'invites'])(
+  it.each(['teams', 'memberships', 'services', 'check_results', 'incidents', 'invites'])(
     'filters %s to the current user',
     async (table) => {
       const column = table === 'teams' ? 'id' : 'team_id';
@@ -112,6 +114,8 @@ describe('row-level security without any application checks', () => {
     'SELECT * FROM sessions',
     'SELECT * FROM user_identities',
     'SELECT * FROM schema_migrations',
+    'SELECT * FROM check_jobs',
+    'DELETE FROM incidents',
     `INSERT INTO memberships (team_id, user_id, role) VALUES (gen_random_uuid(), gen_random_uuid(), 'owner')`,
     'UPDATE services SET last_ok = true',
     'DELETE FROM check_results',
